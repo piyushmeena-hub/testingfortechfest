@@ -335,7 +335,37 @@ function drawTarget(ctx, cv, view, target) {
   ctx.fillText('mission target', c.x, c.y + 32 * U);
 }
 
+function drawReturnRoutes(ctx, cv, view, s) {
+  const U = window.uiScale || 1;
+  const baseScreen = worldToScreen(view, cv, s.base.x, s.base.y);
+  for (const d of s.drones) {
+    if (d.mode === 'returning' || d.mode === 'landing') {
+      const droneScreen = worldToScreen(view, cv, d.x, d.y);
+      ctx.beginPath();
+      ctx.moveTo(droneScreen.x, droneScreen.y);
+      ctx.lineTo(baseScreen.x, baseScreen.y);
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 2 * U;
+      ctx.setLineDash([6 * U, 4 * U]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      const mx = (droneScreen.x + baseScreen.x) / 2;
+      const my = (droneScreen.y + baseScreen.y) / 2;
+      ctx.font = (9 * U) + 'px "IBM Plex Mono", monospace';
+      ctx.fillStyle = '#38bdf8';
+      ctx.textAlign = 'center';
+      ctx.fillText('RTB ➔ GCS', mx, my - 6 * U);
+    }
+  }
+}
+
 function droneColor(d) {
+  if (d.mode === 'returning' || d.mode === 'landing') return '#38bdf8';
+  if (d.mode === 'landed') {
+    if (d.role === 'RECHARGING') return '#fbbf24';
+    return '#4ade80';
+  }
   const r = effRole(d);
   return COLORS[r] || COLORS.dead;
 }
@@ -387,6 +417,13 @@ function drawDrone(ctx, cv, view, d, selected) {
   ctx.font = (10 * U) + 'px "Segoe UI", sans-serif'; ctx.textAlign = 'center';
   ctx.fillStyle = COLORS.textDim;
   ctx.fillText(d.id, c.x, c.y + 24 * U);
+
+  const rText = effRole(d);
+  if (rText === 'RETURNING_TO_BASE' || rText === 'LANDING' || rText === 'LANDED' || rText === 'RECHARGING' || rText === 'AVAILABLE') {
+    ctx.font = (9 * U) + 'px "IBM Plex Mono", monospace';
+    ctx.fillStyle = (rText === 'RETURNING_TO_BASE' || rText === 'LANDING') ? '#38bdf8' : (rText === 'RECHARGING' ? '#fbbf24' : '#4ade80');
+    ctx.fillText(rText, c.x, c.y + 36 * U);
+  }
 }
 
 // C2's memory of where each lost drone was last heard — ghost markers the
@@ -483,6 +520,7 @@ function render(ctx, cv, view, s, status, selected, usable) {
   drawTakMarkers(ctx, cv, view, s);
   drawBase(ctx, cv, view, s.base);
   if (s.pois && s.pois.length) drawPois(ctx, cv, view, s.pois); else drawTarget(ctx, cv, view, s.target);
+  drawReturnRoutes(ctx, cv, view, s);
   for (const d of s.drones) drawDrone(ctx, cv, view, d, d === selected);
   drawWind(ctx, cv, s);
   drawScaleBar(ctx, cv, view);

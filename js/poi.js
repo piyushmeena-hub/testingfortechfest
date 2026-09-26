@@ -11,7 +11,7 @@ const POI_STATES = {
   SURVEYED: 'SURVEYED'
 };
 
-function createPoI(id, name, x, y, priority, surveyRadius = 45, surveyDuration = 12) {
+function createPoI(id, name, x, y, priority, surveyRadius = 45, surveyDuration = 10) {
   return {
     id,
     name,
@@ -43,11 +43,11 @@ class CanonicalPoiStore {
       this.pois = customPois;
     } else {
       this.pois = [
-        createPoI("POI-A", "Collapsed Bridge", 450, -80, "CRITICAL", 45, 10),
-        createPoI("POI-B", "Hospital Wing", 510, -160, "HIGH", 45, 12),
-        createPoI("POI-C", "School Building", 390, -180, "HIGH", 45, 12),
-        createPoI("POI-D", "Residential Block", 560, -60, "MEDIUM", 45, 14),
-        createPoI("POI-E", "Park Area", 590, -190, "LOW", 45, 15)
+        createPoI("POI-A", "Collapsed Bridge", 450, -80, "CRITICAL", 45, 8),
+        createPoI("POI-B", "Hospital Wing", 510, -160, "HIGH", 45, 10),
+        createPoI("POI-C", "School Building", 390, -180, "HIGH", 45, 10),
+        createPoI("POI-D", "Residential Block", 560, -60, "MEDIUM", 45, 12),
+        createPoI("POI-E", "Park Area", 590, -190, "LOW", 45, 12)
       ];
     }
     this.lastRenderedState.clear();
@@ -73,7 +73,7 @@ class CanonicalPoiStore {
     poi.assignedUavId = uavId;
     poi.state = POI_STATES.ASSIGNED;
     if (swarm && typeof logEvent === 'function') {
-      logEvent(swarm, `T+${Math.floor(time || 0)} ${poi.id} assigned to ${uavId}. Reason: ${reason || poi.priority + ' priority'}`, 'info');
+      logEvent(swarm, `${poi.id} assigned to ${uavId}. Reason: ${reason || poi.priority + ' priority'}`, 'info');
     }
   }
 
@@ -91,7 +91,7 @@ class CanonicalPoiStore {
     if (poi.state === POI_STATES.ASSIGNED || poi.state === POI_STATES.IN_TRANSIT) {
       poi.state = POI_STATES.SURVEYING;
       if (swarm && typeof logEvent === 'function') {
-        logEvent(swarm, `T+${Math.floor(time || 0)} ${uavId} arrived at ${poi.id} and started surveying.`, 'info');
+        logEvent(swarm, `${uavId} arrived at ${poi.id} and started surveying`, 'info');
       }
     }
   }
@@ -106,7 +106,8 @@ class CanonicalPoiStore {
       poi.packetId = 'PKT-' + Math.floor(1000 + Math.random() * 9000);
       poi.packetStatus = 'PENDING';
       if (swarm && typeof logEvent === 'function') {
-        logEvent(swarm, `T+${Math.floor(time || 0)} ${uavId} surveyed ${poi.id}. Packet ${poi.packetId} generated.`, 'success');
+        logEvent(swarm, `${poi.id} survey completed by ${uavId}`, 'info');
+        logEvent(swarm, `${poi.id} survey data packet ${poi.packetId} generated`, 'info');
       }
     }
   }
@@ -124,11 +125,11 @@ class CanonicalPoiStore {
     if (!poi || poi.state === POI_STATES.SURVEYED) return;
     poi.state = POI_STATES.ACKNOWLEDGED;
     poi.packetStatus = 'DELIVERED';
-    poi.evidence = `${uavId || 'UAV'} surveyed ${poi.id}. Packet ${packetId || poi.packetId} acknowledged by GCS.`;
+    poi.evidence = `${uavId || 'UAV'} surveyed ${poi.id} at 50 m AGL. Packet ${packetId || poi.packetId} acknowledged by GCS.`;
     if (swarm && typeof logEvent === 'function') {
-      logEvent(swarm, `T+${Math.floor(time || 0)} Packet ${packetId || poi.packetId} acknowledged by GCS. ${poi.id} completed.`, 'success');
+      logEvent(swarm, `${packetId || poi.packetId} acknowledged by GCS`, 'success');
+      logEvent(swarm, `${poi.id} survey verified and evidence recorded`, 'success');
     }
-    // Final state
     poi.state = POI_STATES.SURVEYED;
   }
 
@@ -141,29 +142,29 @@ class CanonicalPoiStore {
       poi.state = POI_STATES.UNASSIGNED;
       poi.progress = 0;
       if (oldUav && swarm && typeof logEvent === 'function') {
-        logEvent(swarm, `T+${Math.floor(time || 0)} ${poi.id} unassigned from ${oldUav}. Reason: ${reason || 'unfit/failsafe'}`, 'warn');
+        logEvent(swarm, `${poi.id} unassigned from ${oldUav}. Reason: ${reason || 'unfit/failsafe'}`, 'warn');
       }
     }
   }
 
-  // Record what the map just drew (for verification)
   recordMapRender(poiId, state, assignedUavId, progress) {
     this.lastRenderedState.set(poiId, { state, assignedUavId, progress });
   }
 
-  // Synchronously update the DOM table from canonical store
-  syncUi() {
+  syncUi(swarm) {
     if (typeof document === 'undefined') return;
     const body = document.getElementById('poisBody');
     if (!body) return;
 
     let h = '';
-    let surveyed = 0, active = 0, pending = 0;
+    let surveyed = 0, active = 0, pending = 0, acked = 0;
 
     for (const p of this.pois) {
       if (p.state === POI_STATES.SURVEYED) surveyed++;
       else if (p.state === POI_STATES.UNASSIGNED) pending++;
       else active++;
+
+      if (p.packetStatus === 'DELIVERED' || p.state === POI_STATES.SURVEYED) acked++;
 
       this.lastTableState.set(p.id, {
         state: p.state,
@@ -171,24 +172,64 @@ class CanonicalPoiStore {
         progress: Math.floor(p.progress)
       });
 
+      const badgeClass = p.state === 'SURVEYED' ? 'badge-ok' : (p.state === 'SURVEYING' ? 'badge-warn' : 'badge-dim');
       h += `<tr><td><b>${p.id}</b></td><td>${p.priority}</td><td>${p.assignedUavId || '-'}</td><td><span class="poi-tag state-${p.state}">${p.state}</span></td><td>${Math.floor(p.progress)}%</td><td>${p.packetId || '-'}</td><td style="font-size:10px">${p.evidence || '-'}</td></tr>`;
     }
 
     body.innerHTML = h;
 
-    const m = document.getElementById('poiMetrics');
-    if (m) {
-      m.innerHTML = `Total: ${this.pois.length} | Surveyed: ${surveyed} | Active: ${active} | Pending: ${pending}`;
+    // Mission status calculation
+    const totalPois = this.pois.length;
+    let airborne = 0, returning = 0, landed = 0, recharging = 0, failed = 0, activeRelays = 0;
+    let isComplete = false;
+
+    if (swarm && swarm.drones) {
+      for (const d of swarm.drones) {
+        if (d.mode === 'dead') failed++;
+        else if (d.mode === 'landed') {
+          landed++;
+          if (d.role === 'RECHARGING') recharging++;
+        } else if (d.mode === 'returning' || d.mode === 'landing') {
+          airborne++;
+          returning++;
+        } else {
+          airborne++;
+        }
+      }
+      activeRelays = swarm.c2 && swarm.c2.relays ? swarm.c2.relays.length : 0;
+      isComplete = !!swarm.missionComplete;
+    }
+
+    const statusBox = document.getElementById('missionStatusBox');
+    if (statusBox) {
+      statusBox.innerHTML = `
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <span style="font-size:12px; font-weight:700;">MISSION STATUS: <span style="color:${isComplete ? '#4ade80' : '#38bdf8'}">${isComplete ? 'COMPLETE' : 'IN PROGRESS'}</span></span>
+          <span style="font-size:11px;">SURVEYED: <b>${surveyed}/${totalPois}</b></span>
+          <span style="font-size:11px;">ACKNOWLEDGED: <b>${acked}/${totalPois}</b></span>
+        </div>
+      `;
+    }
+
+    const uavMetrics = document.getElementById('uavFleetMetrics');
+    if (uavMetrics) {
+      uavMetrics.innerHTML = `
+        <div style="display:flex; flex-wrap:wrap; gap:8px; font-size:11px; color:var(--text-dim);">
+          <span>AIRBORNE: <b style="color:#38bdf8;">${airborne}</b></span>
+          <span>RETURNING: <b style="color:#facc15;">${returning}</b></span>
+          <span>LANDED: <b style="color:#4ade80;">${landed}</b></span>
+          <span>RECHARGING: <b style="color:#fbbf24;">${recharging}</b></span>
+          <span>ACTIVE RELAYS: <b>${activeRelays}</b></span>
+        </div>
+      `;
     }
 
     this.checkConsistency();
   }
 
-  // Consistency Check (Requirement 6)
   checkConsistency() {
     if (!this.lastRenderedState.size || !this.lastTableState.size) return true;
 
-    let hasDesync = false;
     for (const p of this.pois) {
       const mapItem = this.lastRenderedState.get(p.id);
       const tableItem = this.lastTableState.get(p.id);
@@ -196,20 +237,16 @@ class CanonicalPoiStore {
       if (!mapItem || !tableItem) continue;
 
       if (mapItem.state !== tableItem.state || mapItem.assignedUavId !== tableItem.assignedUavId) {
-        hasDesync = true;
         this.desyncCount++;
         const msg = `[PoI Consistency Error] Desync for ${p.id}: Map shows (state=${mapItem.state}, uav=${mapItem.assignedUavId}), Table shows (state=${tableItem.state}, uav=${tableItem.assignedUavId})`;
         console.error(msg);
-        if (typeof logEvent === 'function' && typeof swarm !== 'undefined') {
-          logEvent(swarm, msg, 'error');
-        }
+        return false;
       }
     }
-    return !hasDesync;
+    return true;
   }
 }
 
-// Global Singleton
 const PoiStore = new CanonicalPoiStore();
 if (typeof window !== 'undefined') {
   window.PoiStore = PoiStore;

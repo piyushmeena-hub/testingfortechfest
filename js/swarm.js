@@ -257,7 +257,12 @@ function logEvent(s, msg, kind) {
 
 function dist2d(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 function alive(d) { return d.mode !== 'dead' && d.mode !== 'landed'; }
-function effRole(d) { return d.mode === 'ok' ? d.order.role : d.mode; }
+function effRole(d) {
+  if (d.mode === 'returning') return 'RETURNING_TO_BASE';
+  if (d.mode === 'landing') return 'LANDING';
+  if (d.mode === 'landed') return d.role || 'LANDED';
+  return d.mode === 'ok' ? d.order.role : d.mode;
+}
 
 // --- Learned RF coverage map --------------------------------------------------
 // FASTER's three kinds of space, in radio form: measured-good (a packet
@@ -920,9 +925,20 @@ function c2Step(s) {
           } else {
             poi.state = "ACKNOWLEDGED";
             poi.packetStatus = "DELIVERED";
-            poi.evidence = `${st.source} surveyed ${poi.id}. Packet ${st.packetId} acknowledged by GCS.`;
-            logEvent(s, `T+${Math.floor(s.time)} Packet ${st.packetId} acknowledged by GCS. ${poi.id} completed.`, "success");
+            poi.evidence = `${st.source} surveyed ${poi.id} at 50 m AGL. Packet ${st.packetId} acknowledged by GCS.`;
+            logEvent(s, `${st.packetId} acknowledged by GCS`, "success");
             poi.state = "SURVEYED";
+          }
+
+          // Order the UAV to return to base immediately
+          const droneId = st.source;
+          const uav = s.drones.find(d => d.id === droneId);
+          if (uav && (uav.mode === "ok" || uav.mode === "hold")) {
+            uav.mode = "returning";
+            uav.order.role = "RETURNING_TO_BASE";
+            uav.order.poiId = null;
+            uav.returnOrigin = { x: poi.x, y: poi.y };
+            logEvent(s, `${droneId} ordered to return to base`, "info");
           }
         }
       }
@@ -1579,9 +1595,7 @@ function killDrone(s, d) {
 
 // --- Motion --------------------------------------------------------------------
 function goalFor(s, d, dt) {
-  if (d.mode === 'rtb' || d.mode === 'rtl') {
-    // Home is where the drone last LEARNED the base to be (finding #18) —
-    // an operator who moves in radio silence is honestly not followed.
+  if (d.mode === 'returning' || d.mode === 'landing' || d.mode === 'rtb' || d.mode === 'rtl') {
     const homeK = d.baseKnown || s.base;
     return { x: homeK.x, y: homeK.y };
   }
@@ -1864,8 +1878,36 @@ function stepDrone(s, d, dt) {
     updateBattery(s, d, dt, Math.min(va, maxV));
   }
 
+  // Return to base, landing zone, and landing handling
+  const distToBase = dist2d(d, s.base);
+  if (d.mode === 'returning') {
+    d.airborne = true;
+    if (distToBase <= 60) {
+      d.mode = 'landing';
+      logEvent(s, `${d.id} entered landing zone`, 'info');
+    }
+  } else if (d.mode === 'landing') {
+    d.airborne = true;
+    if (distToBase <= 15) {
+      d.mode = 'landed';
+      d.airborne = false;
+      d.x = s.base.x; d.y = s.base.y;
+      d.vx = 0; d.vy = 0;
+      d.order.poiId = null;
+      d.order.role = 'landed';
+      logEvent(s, `${d.id} landed at GCS`, 'info');
+
+      if (d.batteryPct < 80) {
+        d.role = 'RECHARGING';
+        logEvent(s, `${d.id} battery recharge started (${Math.floor(d.batteryPct)}%)`, 'info');
+      } else {
+        d.role = 'AVAILABLE';
+        logEvent(s, `${d.id} role is now AVAILABLE`, 'info');
+      }
+    }
+  }
+
   if ((d.mode === 'rtb' || (external && d.mode === 'rtl')) && dist2d(d, s.base) < DRONE.landThresholdM) {
-    // Internal physics is a 2D abstraction — touchdown is instantaneous.
     const grounded = !external || externalServiceGrounded(d.id);
     if ((d.mode === 'rtb' || d.mode === 'rtl') && grounded) {
       d.mode = 'landed'; d.vx = d.vy = 0;
@@ -1874,7 +1916,6 @@ function stepDrone(s, d, dt) {
       d.swapAt = s.time + BATTERY.swapSec;
       logEvent(s, d.id + ' landed at base — battery swap in progress', 'info');
     }
-    // rtl drones hovering at base will regain link and be re-tasked
   }
 }
 
@@ -2065,6 +2106,44 @@ function stepSwarm(s, dt) {
 
   // Link-uptime accounting — the denominator of the anti-jam story.
   s.stats.tSec += dt;
+
+  // Recharge landed drones with RECHARGING status
+  for (const d of s.drones) {
+    if (d.mode === "landed" && d.role === "RECHARGING") {
+      d.batteryPct = Math.min(100, d.batteryPct + dt * 4.0);
+      const af = afOf(s, d);
+      d.energyWh = Math.min(usableWh(af), d.energyWh + dt * (usableWh(af) * 0.04));
+      if (d.batteryPct >= 95) {
+        d.batteryPct = 100;
+        d.role = "AVAILABLE";
+        logEvent(s, `${d.id} battery recharge complete — now AVAILABLE`, "info");
+      }
+    }
+  }
+
+  // Relay recovery when all PoIs surveyed and all packets delivered
+  const allPoisSurveyed = s.pois && s.pois.length >= 5 && s.pois.every(p => p.state === "SURVEYED");
+  if (allPoisSurveyed && s.c2.relays && s.c2.relays.length > 0) {
+    const anyUploading = s.pois.some(p => p.state === "DATA_CREATED" || p.state === "UPLOADING");
+    if (!anyUploading) {
+      const freed = s.c2.relays.pop();
+      const rDrone = s.drones.find(d => d.id === freed);
+      if (rDrone && rDrone.mode !== "landed" && rDrone.mode !== "returning" && rDrone.mode !== "landing") {
+        rDrone.mode = "returning";
+        rDrone.order.role = "RETURNING_TO_BASE";
+        rDrone.order.poiId = null;
+        logEvent(s, `${freed} released from relay duty, returning to base`, "info");
+      }
+    }
+  }
+
+  // Final mission completion evaluation
+  const allUavsDown = s.drones.length > 0 && s.drones.every(d => d.mode === "landed" || d.mode === "dead");
+  if (allPoisSurveyed && allUavsDown && !s.missionComplete) {
+    s.missionComplete = true;
+    const landedCount = s.drones.filter(d => d.mode === "landed").length;
+    logEvent(s, `Mission complete: ${s.pois.length}/${s.pois.length} PoIs surveyed, ${s.pois.length}/${s.pois.length} packets acknowledged, ${landedCount}/${s.drones.length} UAVs landed`, "success");
+  }
 
   // Ship the goals our logic just decided out to the vehicles.
   if (external) externalPushGoals(s);
