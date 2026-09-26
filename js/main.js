@@ -1342,7 +1342,25 @@
         '<span class="fbat"><span class="fbat-fill" style="width:' + d.batteryPct.toFixed(0) + '%"></span></span>' +
         '<span class="fpct">' + d.batteryPct.toFixed(0) + '%</span></div>';
     }).join('');
-    if (fleetHtml !== lastFleetHtml) { fleetBody.innerHTML = fleetHtml; lastFleetHtml = fleetHtml; }
+        if (fleetHtml !== lastFleetHtml) { fleetBody.innerHTML = fleetHtml; lastFleetHtml = fleetHtml; }
+
+    if (swarm.pois) {
+      const pBody = document.getElementById('poisBody');
+      if (pBody) {
+        let h = '';
+        let surveyed = 0, active = 0, pending = 0;
+        for (const p of swarm.pois) {
+            if (p.state === 'SURVEYED') surveyed++;
+            else if (p.state === 'UNASSIGNED') pending++;
+            else active++;
+            h += `<tr><td>${p.id}</td><td>${p.priority}</td><td>${p.assignedUavId || '-'}</td><td>${p.state}</td><td>${Math.floor(p.progress)}%</td><td>${p.packetId || '-'}</td><td style="font-size:10px">${p.evidence || '-'}</td></tr>`;
+        }
+        pBody.innerHTML = h;
+        const m = document.getElementById('poiMetrics');
+        if (m) m.innerHTML = `Total: ${swarm.pois.length} | Surveyed: ${surveyed} | Active: ${active} | Pending: ${pending}`;
+      }
+    }
+
 
     const evHtml = swarm.events.slice().reverse().map(ev =>
       '<div class="ev ev-' + escHtml(ev.kind) + '"><span class="ev-t">' + fmtSimClock(ev.t) + '</span>' + escHtml(ev.msg) + '</div>'

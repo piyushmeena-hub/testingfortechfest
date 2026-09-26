@@ -342,6 +342,19 @@
       <div id="chanLine" class="af-info"></div>
     </section>
 
+    
+    <section>
+      <h2>Disaster PoIs</h2>
+      <div class="btn-row">
+        <button id="addCriticalPoiBtn">Detect New Critical PoI</button>
+      </div>
+      <div id="poiMetrics" class="af-info" style="margin-top:8px;"></div>
+      <table>
+        <thead><tr><th>PoI</th><th>Priority</th><th>UAV</th><th>State</th><th>Prog</th><th>Pkt</th><th>Evidence</th></tr></thead>
+        <tbody id="poisBody"></tbody>
+      </table>
+    </section>
+
     <section>
       <h2>Fleet</h2>
       <div id="fleetBody"></div>
@@ -354,6 +367,7 @@
   </aside>
 </main>
 
+<script src="js/poi.js?v=4"></script>
 <script src="js/radios.js"></script>
 <script src="js/terrain.js"></script>
 <script src="js/osm.js"></script>
@@ -367,11 +381,11 @@
 <script src="js/tak.js"></script>
 <script src="js/adversary.js"></script>
 <script src="js/net.js"></script>
-<script src="js/swarm.js"></script>
-<script src="js/render.js"></script>
+<script src="js/swarm.js?v=4"></script>
+<script src="js/render.js?v=4"></script>
 <script src="js/view3d.js"></script>
 <script src="js/external.js"></script>
-<script src="js/main.js"></script>
+<script src="js/main.js?v=4"></script>
 
 </body>
 </html>

@@ -170,10 +170,16 @@ function makeSwarm(opts) {
       x: (opts.base && opts.base.x != null) ? opts.base.x : (opts.baseX != null ? opts.baseX : 0),
       y: (opts.base && opts.base.y != null) ? opts.base.y : (opts.baseY != null ? opts.baseY : 0),
     },
-    target: {
-      x: (opts.target && opts.target.x != null) ? opts.target.x : opts.targetX,
-      y: (opts.target && opts.target.y != null) ? opts.target.y : opts.targetY,
-    },
+    pois: opts.pois ? JSON.parse(JSON.stringify(opts.pois)) : (typeof defaultPois === "function" ? defaultPois() : []),
+    target: (() => {
+      const pList = opts.pois || (typeof defaultPois === "function" ? defaultPois() : []);
+      const cx = pList.length ? pList.reduce((acc, p) => acc + p.x, 0) / pList.length : 520;
+      const cy = pList.length ? pList.reduce((acc, p) => acc + p.y, 0) / pList.length : -140;
+      return {
+        x: (opts.target && opts.target.x != null) ? opts.target.x : (opts.targetX != null ? opts.targetX : cx),
+        y: (opts.target && opts.target.y != null) ? opts.target.y : (opts.targetY != null ? opts.targetY : cy)
+      };
+    })(),
     drones: [],
     time: 0,
     airframe: opts.airframe,
@@ -905,6 +911,18 @@ function c2Step(s) {
   // a coverage measurement: the link provably worked at that position.
   for (const p of s.c2.inbox) {
     s.c2.known[p.src] = { ...p.payload, at: s.time };
+    if (p.payload.poiStatus) {
+      for (const st of p.payload.poiStatus) {
+        const poi = s.pois.find(x => x.id === st.id);
+        if (poi && st.state === 'DATA_CREATED' && poi.state !== 'SURVEYED' && poi.state !== 'ACKNOWLEDGED') {
+           poi.state = 'ACKNOWLEDGED';
+           poi.packetStatus = 'DELIVERED';
+           poi.evidence = `${st.source} surveyed ${poi.id}. Packet ${st.packetId} acknowledged by GCS.`;
+           logEvent(s, `T+${Math.floor(s.time)} Packet ${st.packetId} acknowledged by GCS. ${poi.id} completed.`, 'success');
+           poi.state = 'SURVEYED'; // Transition immediately for simplicity
+        }
+      }
+    }
     s.c2.everHeard.add(p.src);
     covMark(s, p.payload.x, p.payload.y, 'good');
     if (p.payload.deadLog && p.payload.deadLog.length) {
@@ -1155,7 +1173,49 @@ function c2Step(s) {
   // (slot 0 off C2), the flock hangs off the last relay, the rescuer off
   // its anchor.
   const lastRelay = s.c2.relays.length ? s.c2.relays[s.c2.relays.length - 1] : 'C2';
+  
+  // --- POI Scheduling & Assignment ---
+  const missionDrones = Object.keys(known).filter(id => fresh(id) && known[id].role === 'mission' && !s.c2.relays.includes(id) && !s.c2.rescuers.includes(id) && !(s.c2.unfit[id] > s.time));
+  
+  // Free dead/unfit drone assignments
+  for (const poi of s.pois) {
+    if (poi.assignedUavId && !missionDrones.includes(poi.assignedUavId) && poi.state !== 'SURVEYED' && poi.state !== 'ACKNOWLEDGED') {
+      poi.assignedUavId = null;
+      poi.state = 'UNASSIGNED';
+      poi.progress = 0;
+    }
+  }
+
+  const pendingPois = s.pois.filter(p => p.state === 'UNASSIGNED').sort((a, b) => POI_PRIORITY[b.priority] - POI_PRIORITY[a.priority]);
+  for (const poi of pendingPois) {
+    if (poi.assignedUavId) continue;
+    let bestDrone = null, bestScore = -Infinity;
+    for (const id of missionDrones) {
+      if (s.pois.some(p => p.assignedUavId === id && p.state !== 'SURVEYED')) continue; // 1 poi per drone
+      const dPos = known[id];
+      const dist = dist2d(dPos, poi);
+      const reqBattery = (dist / 12) * 0.1 + 10; // rough heuristic
+      if (dPos.battery < reqBattery) continue;
+      
+      const score = -dist + (dPos.battery * 10);
+      if (score > bestScore) { bestScore = score; bestDrone = id; }
+    }
+    if (bestDrone) {
+      poi.assignedUavId = bestDrone;
+      poi.state = 'ASSIGNED';
+      logEvent(s, `T+${Math.floor(s.time)} ${poi.id} assigned to ${bestDrone}. Reason: ${poi.priority} priority, shortest feasible route.`, 'info');
+    }
+  }
+
+  // Update target to centroid of active POIs so relay chain follows
+  let activePois = s.pois.filter(p => p.state !== 'SURVEYED');
+  if (activePois.length) {
+    s.target.x = activePois.reduce((sum, p) => sum + p.x, 0) / activePois.length;
+    s.target.y = activePois.reduce((sum, p) => sum + p.y, 0) / activePois.length;
+  }
+  
   const buildOrder = id => {
+
     if (rescueOrders[id]) {
       return {
         role: 'rescue', slot: -1, goto: rescueOrders[id].goto,
@@ -1178,8 +1238,9 @@ function c2Step(s) {
       videoOn: id === s.c2.vidGrantee,
       videoUntil: id === s.c2.vidGrantee && s.c2.vidGrantAt != null ? s.c2.vidGrantAt + VID_GRANT_SEC : null,
       videoGrant: id === s.c2.vidGrantee ? (s.c2.vidGrantSeq || 0) : null,
-      c2: { x: s.base.x, y: s.base.y }, // the GCS streams its own position (finding #18)
-      target: { x: s.target.x, y: s.target.y },
+      c2: { x: s.base.x, y: s.base.y },
+      target: (slot < 0 && s.pois) ? (() => { const p = s.pois.find(poi => poi.assignedUavId === id && poi.state !== "SURVEYED"); return p ? { x: p.x, y: p.y } : { x: s.target.x, y: s.target.y }; })() : { x: s.target.x, y: s.target.y },
+      poiId: (slot < 0 && s.pois) ? (() => { const p = s.pois.find(poi => poi.assignedUavId === id && poi.state !== "SURVEYED"); return p ? p.id : null; })() : null,
     };
   };
 
@@ -1191,7 +1252,7 @@ function c2Step(s) {
       : up && Number.isFinite(up.posAt) ? { x: up.x, y: up.y, at: up.posAt } : null;
     return order;
   };
-  const ids = Object.keys(known);
+  var ids = Object.keys(known);
 
   // --- Payload scheduling (video backhaul) --------------------------------
   // One streamer at a time: a store-and-forward relay chain divides its
@@ -1368,6 +1429,7 @@ function droneComms(s, d) {
       gps: d.gpsDenied ? 'denied' : 'ok',   // drones DO know when they've lost the fix
       battery: d.batteryPct, role: effRole(d),
       cls: d.cls,   // fleet class rides along so C2 assigns roles by capability
+      poiStatus: s.pois ? s.pois.map(p => ({ id: p.id, state: p.state, packetId: p.packetId, source: p.assignedUavId })) : null,
       reject: d.rejectedRole || null,
       deadLog: unacked,
       deadLogMaxSeq: deadLogMaxSeq,
@@ -1522,9 +1584,10 @@ function goalFor(s, d, dt) {
   }
   const idx = Math.max(0, flock.indexOf(d));
   const a = d.orbitPhase + (idx / Math.max(1, flock.length)) * Math.PI * 2;
+  const orbitR = d.order.poiId ? 20 : DRONE.orbitRadiusM;
   return {
-    x: d.order.target.x + DRONE.orbitRadiusM * Math.cos(a),
-    y: d.order.target.y + DRONE.orbitRadiusM * Math.sin(a),
+    x: d.order.target.x + orbitR * Math.cos(a),
+    y: d.order.target.y + orbitR * Math.sin(a),
   };
 }
 
@@ -1605,6 +1668,32 @@ function sepNeighbors(s, x, y) {
 }
 
 function stepDrone(s, d, dt) {
+  // --- POI Survey Execution ---
+  if (d.mode === 'ok' && d.order.poiId) {
+    const poi = s.pois.find(p => p.id === d.order.poiId);
+    if (poi && poi.state !== 'SURVEYED' && poi.state !== 'ACKNOWLEDGED') {
+      const dist = dist2d(d, poi);
+      if (dist < poi.surveyRadius) {
+        if (poi.state === 'ASSIGNED' || poi.state === 'IN_TRANSIT') {
+          poi.state = 'SURVEYING';
+          logEvent(s, `T+${Math.floor(s.time)} ${d.id} arrived at ${poi.id} and started surveying.`, 'info');
+        }
+        if (poi.state === 'SURVEYING') {
+          poi.progress += (dt / poi.surveyDuration) * 100;
+          if (poi.progress >= 100) {
+            poi.progress = 100;
+            poi.state = 'DATA_CREATED';
+            poi.packetId = 'PKT-' + Math.floor(Math.random()*10000);
+            poi.packetStatus = 'PENDING';
+            logEvent(s, `T+${Math.floor(s.time)} ${d.id} surveyed ${poi.id} at ${Math.floor(d.altM||0)}m AGL. Packet ${poi.packetId} generated.`, 'success');
+          }
+        }
+      } else {
+        if (poi.state === 'ASSIGNED') poi.state = 'IN_TRANSIT';
+      }
+    }
+  }
+
   if (!alive(d)) return;
 
   droneComms(s, d);

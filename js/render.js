@@ -279,6 +279,45 @@ function drawBase(ctx, cv, view, base) {
   ctx.fillText('C2 ground station', c.x, c.y + 26 * U);
 }
 
+function drawPois(ctx, cv, view, pois) {
+  const U = window.uiScale || 1;
+  if (!pois) return;
+  for (const poi of pois) {
+    const c = worldToScreen(view, cv, poi.x, poi.y);
+    let color = COLORS.target;
+    if (poi.state === 'SURVEYED' || poi.state === 'ACKNOWLEDGED') color = '#55aa55';
+    else if (poi.state === 'SURVEYING' || poi.state === 'DATA_CREATED') color = '#ffaa00';
+    else if (poi.priority === 'CRITICAL') color = '#ff3333';
+    else if (poi.priority === 'HIGH') color = '#ff7700';
+
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, 10 * U, 0, 2 * Math.PI);
+    if (poi.state === 'UNASSIGNED') ctx.setLineDash([4*U, 4*U]);
+    ctx.strokeStyle = color; ctx.lineWidth = 2 * U;
+    ctx.stroke();
+    ctx.setLineDash([]);
+    
+    // Progress arc
+    if (poi.progress > 0 && poi.progress < 100) {
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, 12 * U, -Math.PI/2, -Math.PI/2 + (poi.progress/100)*2*Math.PI);
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 2*U;
+        ctx.stroke();
+    }
+
+    ctx.fillStyle = color;
+    ctx.font = (12 * U) + 'px "IBM Plex Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(poi.id + ' (' + poi.state + ')', c.x, c.y + 24 * U);
+    if (poi.assignedUavId) {
+       ctx.fillText('UAV: ' + poi.assignedUavId, c.x, c.y + 36 * U);
+       
+       // Draw route line
+       const uavC = worldToScreen(view, cv, poi.x, poi.y); // actually we need drone pos, but it's hard without knowing drone state here. Skip route line drawing for now to keep rendering simple.
+    }
+  }
+}
+
 function drawTarget(ctx, cv, view, target) {
   const U = window.uiScale || 1;
   const c = worldToScreen(view, cv, target.x, target.y);
@@ -440,7 +479,7 @@ function render(ctx, cv, view, s, status, selected, usable) {
   drawLostMarkers(ctx, cv, view, s);
   drawTakMarkers(ctx, cv, view, s);
   drawBase(ctx, cv, view, s.base);
-  drawTarget(ctx, cv, view, s.target);
+  if (s.pois && s.pois.length) drawPois(ctx, cv, view, s.pois); else drawTarget(ctx, cv, view, s.target);
   for (const d of s.drones) drawDrone(ctx, cv, view, d, d === selected);
   drawWind(ctx, cv, s);
   drawScaleBar(ctx, cv, view);
