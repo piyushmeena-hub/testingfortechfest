@@ -283,6 +283,9 @@ function drawPois(ctx, cv, view, pois) {
   const U = window.uiScale || 1;
   if (!pois) return;
   for (const poi of pois) {
+    if (typeof PoiStore !== "undefined" && PoiStore.recordMapRender) {
+      PoiStore.recordMapRender(poi.id, poi.state, poi.assignedUavId, Math.floor(poi.progress));
+    }
     const c = worldToScreen(view, cv, poi.x, poi.y);
     let color = COLORS.target;
     if (poi.state === 'SURVEYED' || poi.state === 'ACKNOWLEDGED') color = '#55aa55';

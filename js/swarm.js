@@ -165,16 +165,16 @@ function makeDrone(x, y, target, rng, airframe, radio, cls) {
 
 function makeSwarm(opts) {
   droneSeq = 0;
+  const canonicalPois = (typeof PoiStore !== "undefined") ? PoiStore.init(opts.pois) : (typeof defaultPois === "function" ? defaultPois() : []);
   const s = {
     base: {
       x: (opts.base && opts.base.x != null) ? opts.base.x : (opts.baseX != null ? opts.baseX : 0),
       y: (opts.base && opts.base.y != null) ? opts.base.y : (opts.baseY != null ? opts.baseY : 0),
     },
-    pois: opts.pois ? JSON.parse(JSON.stringify(opts.pois)) : (typeof defaultPois === "function" ? defaultPois() : []),
+    pois: canonicalPois,
     target: (() => {
-      const pList = opts.pois || (typeof defaultPois === "function" ? defaultPois() : []);
-      const cx = pList.length ? pList.reduce((acc, p) => acc + p.x, 0) / pList.length : 520;
-      const cy = pList.length ? pList.reduce((acc, p) => acc + p.y, 0) / pList.length : -140;
+      const cx = canonicalPois.length ? canonicalPois.reduce((acc, p) => acc + p.x, 0) / canonicalPois.length : 520;
+      const cy = canonicalPois.length ? canonicalPois.reduce((acc, p) => acc + p.y, 0) / canonicalPois.length : -140;
       return {
         x: (opts.target && opts.target.x != null) ? opts.target.x : (opts.targetX != null ? opts.targetX : cx),
         y: (opts.target && opts.target.y != null) ? opts.target.y : (opts.targetY != null ? opts.targetY : cy)
@@ -914,12 +914,16 @@ function c2Step(s) {
     if (p.payload.poiStatus) {
       for (const st of p.payload.poiStatus) {
         const poi = s.pois.find(x => x.id === st.id);
-        if (poi && st.state === 'DATA_CREATED' && poi.state !== 'SURVEYED' && poi.state !== 'ACKNOWLEDGED') {
-           poi.state = 'ACKNOWLEDGED';
-           poi.packetStatus = 'DELIVERED';
-           poi.evidence = `${st.source} surveyed ${poi.id}. Packet ${st.packetId} acknowledged by GCS.`;
-           logEvent(s, `T+${Math.floor(s.time)} Packet ${st.packetId} acknowledged by GCS. ${poi.id} completed.`, 'success');
-           poi.state = 'SURVEYED'; // Transition immediately for simplicity
+        if (poi && (st.state === "DATA_CREATED" || st.state === "UPLOADING") && poi.state !== "SURVEYED" && poi.state !== "ACKNOWLEDGED") {
+          if (typeof PoiStore !== "undefined") {
+            PoiStore.acknowledge(poi.id, st.source, st.packetId, s.time, s);
+          } else {
+            poi.state = "ACKNOWLEDGED";
+            poi.packetStatus = "DELIVERED";
+            poi.evidence = `${st.source} surveyed ${poi.id}. Packet ${st.packetId} acknowledged by GCS.`;
+            logEvent(s, `T+${Math.floor(s.time)} Packet ${st.packetId} acknowledged by GCS. ${poi.id} completed.`, "success");
+            poi.state = "SURVEYED";
+          }
         }
       }
     }
@@ -1177,33 +1181,48 @@ function c2Step(s) {
   // --- POI Scheduling & Assignment ---
   const missionDrones = Object.keys(known).filter(id => fresh(id) && known[id].role === 'mission' && !s.c2.relays.includes(id) && !s.c2.rescuers.includes(id) && !(s.c2.unfit[id] > s.time));
   
-  // Free dead/unfit drone assignments
+  // Free dead/unfit drone assignments (stable: only if dead, RTB, or drafted as relay)
   for (const poi of s.pois) {
-    if (poi.assignedUavId && !missionDrones.includes(poi.assignedUavId) && poi.state !== 'SURVEYED' && poi.state !== 'ACKNOWLEDGED') {
-      poi.assignedUavId = null;
-      poi.state = 'UNASSIGNED';
-      poi.progress = 0;
+    if (poi.assignedUavId && poi.state !== "SURVEYED" && poi.state !== "ACKNOWLEDGED") {
+      const uId = poi.assignedUavId;
+      const kU = known[uId];
+      const isRelay = s.c2.relays.includes(uId);
+      const isDeadOrRtb = kU && (kU.role === "rtb" || kU.role === "dead" || kU.role === "landed");
+      const isTrulyLost = s.c2.lost && s.c2.lost[uId] && (s.time - s.c2.lost[uId].at > 8.0);
+      if (isRelay || isDeadOrRtb || isTrulyLost) {
+        if (typeof PoiStore !== "undefined") {
+          PoiStore.unassign(poi.id, isRelay ? "drafted as relay" : "UAV unavailable/RTB", s.time, s);
+        } else {
+          poi.assignedUavId = null;
+          poi.state = "UNASSIGNED";
+          poi.progress = 0;
+        }
+      }
     }
   }
 
-  const pendingPois = s.pois.filter(p => p.state === 'UNASSIGNED').sort((a, b) => POI_PRIORITY[b.priority] - POI_PRIORITY[a.priority]);
+  const pendingPois = s.pois.filter(p => p.state === "UNASSIGNED").sort((a, b) => POI_PRIORITY[b.priority] - POI_PRIORITY[a.priority]);
   for (const poi of pendingPois) {
     if (poi.assignedUavId) continue;
     let bestDrone = null, bestScore = -Infinity;
     for (const id of missionDrones) {
-      if (s.pois.some(p => p.assignedUavId === id && p.state !== 'SURVEYED')) continue; // 1 poi per drone
+      if (s.pois.some(p => p.assignedUavId === id && p.state !== "SURVEYED")) continue;
       const dPos = known[id];
       const dist = dist2d(dPos, poi);
-      const reqBattery = (dist / 12) * 0.1 + 10; // rough heuristic
+      const reqBattery = (dist / 12) * 0.1 + 10;
       if (dPos.battery < reqBattery) continue;
       
       const score = -dist + (dPos.battery * 10);
       if (score > bestScore) { bestScore = score; bestDrone = id; }
     }
     if (bestDrone) {
-      poi.assignedUavId = bestDrone;
-      poi.state = 'ASSIGNED';
-      logEvent(s, `T+${Math.floor(s.time)} ${poi.id} assigned to ${bestDrone}. Reason: ${poi.priority} priority, shortest feasible route.`, 'info');
+      if (typeof PoiStore !== "undefined") {
+        PoiStore.assign(poi.id, bestDrone, `${poi.priority} priority, shortest feasible route`, s.time, s);
+      } else {
+        poi.assignedUavId = bestDrone;
+        poi.state = "ASSIGNED";
+        logEvent(s, `T+${Math.floor(s.time)} ${poi.id} assigned to ${bestDrone}. Reason: ${poi.priority} priority, shortest feasible route.`, "info");
+      }
     }
   }
 
@@ -1669,27 +1688,31 @@ function sepNeighbors(s, x, y) {
 
 function stepDrone(s, d, dt) {
   // --- POI Survey Execution ---
-  if (d.mode === 'ok' && d.order.poiId) {
-    const poi = s.pois.find(p => p.id === d.order.poiId);
-    if (poi && poi.state !== 'SURVEYED' && poi.state !== 'ACKNOWLEDGED') {
+  if (d.mode === "ok" && d.order.poiId) {
+    const poi = (typeof PoiStore !== "undefined") ? PoiStore.get(d.order.poiId) : s.pois.find(p => p.id === d.order.poiId);
+    if (poi && poi.state !== "SURVEYED" && poi.state !== "ACKNOWLEDGED") {
       const dist = dist2d(d, poi);
       if (dist < poi.surveyRadius) {
-        if (poi.state === 'ASSIGNED' || poi.state === 'IN_TRANSIT') {
-          poi.state = 'SURVEYING';
-          logEvent(s, `T+${Math.floor(s.time)} ${d.id} arrived at ${poi.id} and started surveying.`, 'info');
-        }
-        if (poi.state === 'SURVEYING') {
-          poi.progress += (dt / poi.surveyDuration) * 100;
-          if (poi.progress >= 100) {
-            poi.progress = 100;
-            poi.state = 'DATA_CREATED';
-            poi.packetId = 'PKT-' + Math.floor(Math.random()*10000);
-            poi.packetStatus = 'PENDING';
-            logEvent(s, `T+${Math.floor(s.time)} ${d.id} surveyed ${poi.id} at ${Math.floor(d.altM||0)}m AGL. Packet ${poi.packetId} generated.`, 'success');
+        if (typeof PoiStore !== "undefined") {
+          PoiStore.startSurvey(poi.id, d.id, s.time, s);
+          PoiStore.updateProgress(poi.id, dt, d.id, s.time, s);
+        } else {
+          if (poi.state === "ASSIGNED" || poi.state === "IN_TRANSIT") poi.state = "SURVEYING";
+          if (poi.state === "SURVEYING") {
+            poi.progress += (dt / poi.surveyDuration) * 100;
+            if (poi.progress >= 100) {
+              poi.progress = 100; poi.state = "DATA_CREATED";
+              poi.packetId = "PKT-" + Math.floor(1000 + Math.random()*9000);
+              poi.packetStatus = "PENDING";
+            }
           }
         }
       } else {
-        if (poi.state === 'ASSIGNED') poi.state = 'IN_TRANSIT';
+        if (typeof PoiStore !== "undefined") {
+          PoiStore.setTransit(poi.id);
+        } else {
+          if (poi.state === "ASSIGNED") poi.state = "IN_TRANSIT";
+        }
       }
     }
   }

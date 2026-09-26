@@ -1136,6 +1136,19 @@
   // --- 3D view ----------------------------------------------------------------
   let view3D = false;
   let cam3D = null;
+  const btnPoi = document.getElementById("addCriticalPoiBtn");
+  if (btnPoi) btnPoi.addEventListener("click", () => {
+    if (!swarm) return;
+    const pId = "POI-" + String.fromCharCode(65 + (swarm.pois ? swarm.pois.length : 5));
+    const newPoi = createPoI(pId, "New Crisis Site", swarm.base.x + 400 + Math.random()*200, swarm.base.y - 50 - Math.random()*150, "CRITICAL", 45, 10);
+    if (typeof PoiStore !== "undefined") {
+      PoiStore.addPoi(newPoi);
+    } else if (swarm.pois) {
+      swarm.pois.push(newPoi);
+    }
+    logEvent(swarm, `T+${Math.floor(swarm.time)} New critical ${pId} detected.`, "warn");
+  });
+
   viewBtn.addEventListener('click', () => {
     view3D = !view3D;
     viewBtn.textContent = view3D ? '2D map' : '3D view';
@@ -1344,22 +1357,7 @@
     }).join('');
         if (fleetHtml !== lastFleetHtml) { fleetBody.innerHTML = fleetHtml; lastFleetHtml = fleetHtml; }
 
-    if (swarm.pois) {
-      const pBody = document.getElementById('poisBody');
-      if (pBody) {
-        let h = '';
-        let surveyed = 0, active = 0, pending = 0;
-        for (const p of swarm.pois) {
-            if (p.state === 'SURVEYED') surveyed++;
-            else if (p.state === 'UNASSIGNED') pending++;
-            else active++;
-            h += `<tr><td>${p.id}</td><td>${p.priority}</td><td>${p.assignedUavId || '-'}</td><td>${p.state}</td><td>${Math.floor(p.progress)}%</td><td>${p.packetId || '-'}</td><td style="font-size:10px">${p.evidence || '-'}</td></tr>`;
-        }
-        pBody.innerHTML = h;
-        const m = document.getElementById('poiMetrics');
-        if (m) m.innerHTML = `Total: ${swarm.pois.length} | Surveyed: ${surveyed} | Active: ${active} | Pending: ${pending}`;
-      }
-    }
+
 
 
     const evHtml = swarm.events.slice().reverse().map(ev =>
@@ -1433,6 +1431,10 @@
 
     if (view3D) renderView3D(ctx, cv, swarm, status, cam3D, selected);
     else render(ctx, cv, view, swarm, status, selected, usable());
+
+    if (typeof PoiStore !== "undefined") {
+      PoiStore.syncUi();
+    }
 
     panelAccum += realDt;
     if (panelAccum > 0.2) { updatePanels(status); panelAccum = 0; }
